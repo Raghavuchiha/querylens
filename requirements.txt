@@ -1,0 +1,11 @@
+pydantic
+sentence-transformers
+faiss-cpu
+rank-bm25
+google-generativeai
+python-dotenv
+pypdf
+ langchain 
+ langchain-community 
+ langchain-text-splitters
+ langchain_huggingface

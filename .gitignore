@@ -1,0 +1,18 @@
+# Virtual Environment
+lens/
+
+# Environment & Secrets
+.env
+
+# Python compiled files
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+
+# Personal files
+Raghav_Mandloi_resum*
+sample.txt
+test.py
