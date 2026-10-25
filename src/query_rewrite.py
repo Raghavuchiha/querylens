@@ -1,8 +1,8 @@
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-
-llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0)
-
+from llm import get_llm
+#llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0)
+llm = get_llm()
 
 def rewrite_query_with_history(current_query, chat_history):
     if not chat_history:

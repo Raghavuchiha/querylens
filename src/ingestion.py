@@ -1,80 +1,86 @@
-import uuid
 import os
+import uuid
+
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from models import Document, Chunk
-from loaders import load_pdf, load_text, load_doc
+
+from loaders import load_doc, load_pdf, load_text
+from models import Chunk, Document
+
+LOADERS = {
+    ".pdf": load_pdf,
+    ".txt": load_text,
+    ".md": load_text,
+    ".docx": load_doc,
+}
+SUPPORTED_EXTENSIONS = set(LOADERS)
+
+splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)
 
 
-def load_documents_from_folder(folder_path, doc_type):
-    file_list = []
-    all_files = os.listdir(folder_path)
-
-    for file_name in all_files:
-        full_path = os.path.join(folder_path, file_name)
-        file_list.append((full_path, doc_type))
-
-    return file_list
+def get_extension(file_path: str) -> str:
+    return os.path.splitext(file_path)[1].lower()
 
 
 def ingest_document(file_path: str, doc_type: str) -> tuple[Document, list[Chunk]]:
-    # 1. Load raw text using the right loader based on file extension
-    if file_path.endswith(".pdf"):
-        raw_docs = load_pdf(file_path)
-    elif file_path.endswith(".txt") or file_path.endswith(".md"):
-        raw_docs = load_text(file_path)
-    elif file_path.endswith(".docx"):
-        raw_docs = load_doc(file_path)
-    else:
+    # 1. Load raw text using the right loader (case-insensitive extension)
+    ext = get_extension(file_path)
+    if ext not in LOADERS:
         raise ValueError(f"Unsupported file type: {file_path}")
+    raw_docs = LOADERS[ext](file_path)
 
-    # 2. Combine all pages/parts into one big string
-    full_text = "\n".join([d.page_content for d in raw_docs])
-
-    # 3. Build our own Document (metadata record)
+    # 2. Build our own Document (metadata record)
     doc_id = str(uuid.uuid4())
     document = Document(
         doc_id=doc_id,
-        name=file_path.split("/")[-1],
+        name=os.path.basename(file_path),
         doc_type=doc_type,
     )
 
-    # 4. Split into overlapping chunks
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=512,
-        chunk_overlap=128,
-    )
-    text_chunks = splitter.split_text(full_text)
-
-    # 5. Wrap each piece of text into our Chunk model
+    # 3. Split each page/part separately so every chunk keeps its page number
     chunks = []
-    for i, chunk_text in enumerate(text_chunks):
-        chunks.append(
-            Chunk(
-                chunk_id=str(uuid.uuid4()),
-                doc_id=doc_id,
-                text=chunk_text,
-                chunk_index=i,
+    chunk_index = 0
+    for raw in raw_docs:
+        page = raw.metadata.get("page")
+        page = page + 1 if isinstance(page, int) else None  # PyPDF pages are 0-based
+
+        for chunk_text in splitter.split_text(raw.page_content):
+            if not chunk_text.strip():
+                continue
+            chunks.append(
+                Chunk(
+                    chunk_id=str(uuid.uuid4()),
+                    doc_id=doc_id,
+                    text=chunk_text,
+                    chunk_index=chunk_index,
+                    page=page,
+                )
             )
-        )
+            chunk_index += 1
+
+    if not chunks:
+        raise ValueError("No extractable text found (scanned or empty file?)")
 
     return document, chunks
 
 
 def ingest_multiple_documents(file_list):
+    """Ingest (file_path, doc_type) pairs. A bad file doesn't stop the others.
+
+    Returns (documents, chunks, errors) where errors is a list of
+    (file_path, message) tuples.
+    """
     all_documents = []
     all_chunks = []
+    errors = []
 
-    for item in file_list:
-        file_path = item[0]
-        doc_type = item[1]
-
-        result = ingest_document(file_path, doc_type)
-        document = result[0]
-        chunks = result[1]
+    for file_path, doc_type in file_list:
+        try:
+            document, chunks = ingest_document(file_path, doc_type)
+        except Exception as e:
+            errors.append((file_path, str(e)))
+            continue
 
         all_documents.append(document)
+        all_chunks.extend(chunks)
 
-        for chunk in chunks:
-            all_chunks.append(chunk)
-
-    return all_documents, all_chunks
+    return all_documents, all_chunks, errors

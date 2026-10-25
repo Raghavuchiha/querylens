@@ -1,113 +1,169 @@
+import hashlib
 import json
-import shutil
 import os
+import re
+import shutil
+import threading
+import uuid
+from collections import Counter
 
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
 
-from ingestion import ingest_multiple_documents
-from vectorstore import hybrid_retrieve
-from synthesis import synthesize_answer
+from ingestion import SUPPORTED_EXTENSIONS, get_extension, ingest_multiple_documents
 from query_rewrite import rewrite_query_with_history
-from langchain_core.messages import HumanMessage, AIMessage
+from synthesis import synthesize_answer
+from vectorstore import HybridIndex
 
 app = FastAPI()
 
-all_chunks = []
+UPLOAD_DIR = "uploaded_files"
+TOP_K = 5
+MAX_HISTORY_MESSAGES = 10  # keep an even number so history starts with a user turn
+
+# In-memory state (lost on restart; fine for a demo, use a DB for production)
+index = HybridIndex()
 all_documents = []
-chat_history = []
 doc_name_lookup = {}
+seen_hashes = {}  # sha256 of file content -> doc_id (used to skip duplicates)
+chat_histories = {}  # conversation_id -> list of messages
+upload_lock = threading.Lock()
 
 
 class QueryRequest(BaseModel):
     query: str
+    conversation_id: str = "default"
 
 
-#upload
-#query
-#document
-#metrics
+def safe_filename(name: str) -> str:
+    """Strip any directory part and unsafe characters from an uploaded filename."""
+    name = os.path.basename((name or "").replace("\\", "/"))
+    name = re.sub(r"[^A-Za-z0-9._ -]", "_", name).strip(" .")
+    return name
+
 
 @app.post("/upload")
-async def upload_documents(
+def upload_documents(
     files: list[UploadFile] = File(...),
     doc_type: str = Form("official")
 ):
-    # Create folder if it doesn't exist
-    os.makedirs("uploaded_files", exist_ok=True)
+    saved_files = []  # (path, doc_type)
+    path_info = {}    # path -> (original filename, content hash)
+    batch_hashes = set()
+    skipped = []
+    errors = []
 
-    saved_files = []
+    with upload_lock:
+        for file in files:
+            filename = safe_filename(file.filename)
 
-    # Save every uploaded file
-    for file in files:
+            if not filename or get_extension(filename) not in SUPPORTED_EXTENSIONS:
+                errors.append(
+                    {"file": file.filename, "error": "Unsupported or invalid file type"}
+                )
+                continue
 
-        file_path = f"uploaded_files/{file.filename}"
+            content = file.file.read()
+            content_hash = hashlib.sha256(content).hexdigest()
 
-        with open(file_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+            if content_hash in seen_hashes or content_hash in batch_hashes:
+                skipped.append({"file": filename, "reason": "Already uploaded"})
+                continue
 
-        saved_files.append((file_path, doc_type))
+            # Each upload gets its own folder: no name collisions, no path tricks
+            folder = os.path.join(UPLOAD_DIR, uuid.uuid4().hex)
+            os.makedirs(folder, exist_ok=True)
+            file_path = os.path.join(folder, filename)
 
-    # Process the uploaded files
-    documents, chunks = ingest_multiple_documents(saved_files)
+            with open(file_path, "wb") as f:
+                f.write(content)
 
-    # Store documents and chunks
-    all_documents.extend(documents)
-    all_chunks.extend(chunks)
+            batch_hashes.add(content_hash)
+            saved_files.append((file_path, doc_type))
+            path_info[file_path] = (filename, content_hash)
 
-    # Store document names
-    for document in documents:
-        doc_name_lookup[document.doc_id] = document.name
+        documents, chunks, ingest_errors = ingest_multiple_documents(saved_files)
+
+        failed_paths = {path for path, _ in ingest_errors}
+        for path, message in ingest_errors:
+            errors.append({"file": path_info[path][0], "error": message})
+            shutil.rmtree(os.path.dirname(path), ignore_errors=True)  # don't keep unusable files
+
+        index.add_chunks(chunks)
+        all_documents.extend(documents)
+
+        # documents come back in the same order as the files that ingested fine
+        ok_paths = [p for p, _ in saved_files if p not in failed_paths]
+        for path, document in zip(ok_paths, documents):
+            doc_name_lookup[document.doc_id] = document.name
+            seen_hashes[path_info[path][1]] = document.doc_id
+
+    if not documents and (errors or skipped):
+        raise HTTPException(
+            status_code=400,
+            detail={"message": "No documents were added", "errors": errors, "skipped": skipped},
+        )
 
     return {
         "message": f"Uploaded {len(documents)} documents",
         "chunks": len(chunks),
-        "document_ids": [doc.doc_id for doc in documents]
+        "document_ids": [doc.doc_id for doc in documents],
+        "skipped": skipped,
+        "errors": errors,
     }
- 
+
 
 @app.post("/query")
-async def query_documents(request: QueryRequest):
+def query_documents(request: QueryRequest):
+    if len(index) == 0:
+        return {
+            "answer": "No documents have been uploaded yet. Please upload a document first.",
+            "citations": [],
+        }
+
     query = request.query
+    history = chat_histories.setdefault(request.conversation_id, [])
 
-    standalone_query = rewrite_query_with_history(query, chat_history)
+    try:
+        standalone_query = rewrite_query_with_history(
+            query, history[-MAX_HISTORY_MESSAGES:]
+        )
+        results = index.search(standalone_query, top_k=TOP_K)
+        answer = synthesize_answer(standalone_query, results, doc_name_lookup)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Query failed: {e}")
 
-    results = hybrid_retrieve(all_chunks, standalone_query, top_k=5)
-    answer = synthesize_answer(standalone_query, results, doc_name_lookup)
-
-    chat_history.append(HumanMessage(content=query))
-    chat_history.append(AIMessage(content=answer.text))
+    history.append(HumanMessage(content=query))
+    history.append(AIMessage(content=answer.text))
 
     return {
         "answer": answer.text,
-        "citations": [
-            {"claim": c.claim, "doc_name": c.doc_name} for c in answer.citations
-        ],
+        "citations": [c.model_dump() for c in answer.citations],
     }
 
 
 @app.get("/documents")
-async def list_documents():
-    
-    
-    result = []
-    for doc in all_documents:
-        chunk_count = len([c for c in all_chunks if c.doc_id == doc.doc_id])
-        result.append({
-            "doc_id": doc.doc_id,
-            "name": doc.name,
-            "doc_type": doc.doc_type,
-            "chunk_count": chunk_count,
-        })
-    return {"documents": result}
+def list_documents():
+    chunk_counts = Counter(c.doc_id for c in index.chunks)
+
+    return {
+        "documents": [
+            {
+                "doc_id": doc.doc_id,
+                "name": doc.name,
+                "doc_type": doc.doc_type,
+                "chunk_count": chunk_counts.get(doc.doc_id, 0),
+            }
+            for doc in all_documents
+        ]
+    }
 
 
 @app.get("/evaluation/metrics")
-async def get_metrics():
+def get_metrics():
     if not os.path.exists("evaluation_results.json"):
         return {"message": "No evaluation results found. Run the eval script first."}
 
     with open("evaluation_results.json", "r") as f:
-        results = json.load(f)
-
-    return results
+        return json.load(f)

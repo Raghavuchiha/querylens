@@ -14,16 +14,15 @@ st.set_page_config(page_title="QueryLens", layout="wide")
 if "conversations" not in st.session_state:
     st.session_state.conversations = {}
 
-if "current_conversation_id" not in st.session_state:
-    new_id = str(uuid.uuid4())
-    st.session_state.conversations[new_id] = []
-    st.session_state.current_conversation_id = new_id
-
 
 def start_new_conversation():
     new_id = str(uuid.uuid4())
     st.session_state.conversations[new_id] = []
     st.session_state.current_conversation_id = new_id
+
+
+if "current_conversation_id" not in st.session_state:
+    start_new_conversation()
 
 
 def get_conversation_title(conversation_id):
@@ -66,6 +65,10 @@ with st.sidebar:
                     if response.status_code == 200:
                         result = response.json()
                         st.success(result["message"])
+                        for item in result.get("skipped", []):
+                            st.info(f"Skipped {item['file']}: {item['reason']}")
+                        for item in result.get("errors", []):
+                            st.warning(f"{item['file']}: {item['error']}")
                     else:
                         st.error(f"Upload failed: {response.text}")
                 except requests.exceptions.ConnectionError:
@@ -113,7 +116,8 @@ if user_input:
         with st.spinner("Thinking..."):
             try:
                 response = requests.post(
-                    f"{API_URL}/query", json={"query": user_input}
+                    f"{API_URL}/query",
+                    json={"query": user_input, "conversation_id": current_id},
                 )
                 if response.status_code == 200:
                     result = response.json()
@@ -122,7 +126,10 @@ if user_input:
                     if result.get("citations"):
                         answer_text += "\n\n**Sources:**\n"
                         for citation in result["citations"]:
-                            answer_text += f"- {citation['claim']} *(from {citation['doc_name']})*\n"
+                            source = citation["doc_name"]
+                            if citation.get("page"):
+                                source += f", p. {citation['page']}"
+                            answer_text += f"- {citation['claim']} *(from {source})*\n"
 
                     st.markdown(answer_text)
                     current_messages.append({"role": "assistant", "content": answer_text})

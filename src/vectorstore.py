@@ -1,54 +1,56 @@
-from langchain_core.documents import Document as LangchainDocument
+import re
+import threading
+from functools import lru_cache
+
 from langchain_community.vectorstores import FAISS
+from langchain_core.documents import Document as LangchainDocument
 from langchain_huggingface import HuggingFaceEmbeddings
 from rank_bm25 import BM25Okapi
+
 from models import Chunk, RetrievalResult
 
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+DEFAULT_TOP_K = 5
+RRF_K = 60
+
+
+@lru_cache(maxsize=1)
+def get_embeddings():
+    # Loaded lazily so importing this module stays fast
+    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+
+def tokenize(text: str) -> list[str]:
+    return re.findall(r"\w+", text.lower())
 
 
 # ---------- Semantic search (FAISS) ----------
 
-def chunks_to_vectorstore(chunks: list[Chunk]):
-    lc_docs = [
-        LangchainDocument(
-            page_content=c.text,
-            metadata={
-                "chunk_id": c.chunk_id,
-                "doc_id": c.doc_id,
-                "chunk_index": c.chunk_index,
-            },
-        )
-        for c in chunks
-    ]
-    return FAISS.from_documents(lc_docs, embeddings)
-
-
-def semantic_search(vectorstore, query, top_k=5):
-
-    results = vectorstore.similarity_search_with_score(
-        query,
-        k=top_k
+def chunk_to_lc_doc(chunk: Chunk) -> LangchainDocument:
+    return LangchainDocument(
+        page_content=chunk.text,
+        metadata={
+            "chunk_id": chunk.chunk_id,
+            "doc_id": chunk.doc_id,
+            "chunk_index": chunk.chunk_index,
+            "page": chunk.page,
+        },
     )
 
+
+def semantic_search(vectorstore, query, top_k=DEFAULT_TOP_K):
+    results = vectorstore.similarity_search_with_score(query, k=top_k)
+
     final_results = []
-
     for document, distance in results:
-
         chunk = Chunk(
             chunk_id=document.metadata["chunk_id"],
             doc_id=document.metadata["doc_id"],
             text=document.page_content,
-            chunk_index=document.metadata["chunk_index"]
+            chunk_index=document.metadata["chunk_index"],
+            page=document.metadata.get("page"),
         )
-
-        score = 1 / (1 + distance)
-
         final_results.append(
-            RetrievalResult(
-                chunk=chunk,
-                score=score
-            )
+            RetrievalResult(chunk=chunk, score=1 / (1 + float(distance)))
         )
 
     return final_results
@@ -60,81 +62,79 @@ class BM25Search:
 
     def __init__(self, chunks):
         self.chunks = chunks
-        documents = [chunk.text.lower().split() for chunk in chunks]
-        self.bm25 = BM25Okapi(documents)
+        self.bm25 = BM25Okapi([tokenize(chunk.text) for chunk in chunks])
 
-    def search(self, query, top_k=5):
-        tokenized_query = query.lower().split()
-        scores = self.bm25.get_scores(tokenized_query)
+    def search(self, query, top_k=DEFAULT_TOP_K):
+        scores = self.bm25.get_scores(tokenize(query))
 
-        scored_chunks = list(zip(self.chunks, scores))
-        scored_chunks.sort(key=lambda x: x[1], reverse=True)
+        scored_chunks = sorted(
+            zip(self.chunks, scores), key=lambda x: x[1], reverse=True
+        )
 
-        results = []
-        for chunk, score in scored_chunks[:top_k]:
-            results.append(RetrievalResult(chunk=chunk, score=score))
-
-        return results
+        return [
+            RetrievalResult(chunk=chunk, score=float(score))
+            for chunk, score in scored_chunks[:top_k]
+        ]
 
 
 # ---------- Hybrid combination (Reciprocal Rank Fusion) ----------
 
-def hybrid_search(semantic_results, bm25_results, top_k=5):
-
-    k = 60
-
+def hybrid_search(semantic_results, bm25_results, top_k=DEFAULT_TOP_K):
     scores = {}
     chunks = {}
 
-    # Semantic ranking
-    for rank, result in enumerate(semantic_results, start=1):
+    for ranked_list in (semantic_results, bm25_results):
+        for rank, result in enumerate(ranked_list, start=1):
+            chunk_id = result.chunk.chunk_id
+            scores[chunk_id] = scores.get(chunk_id, 0) + 1 / (RRF_K + rank)
+            chunks[chunk_id] = result.chunk
 
-        chunk_id = result.chunk.chunk_id
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
-        score = 1 / (k + rank)
-
-        scores[chunk_id] = scores.get(chunk_id, 0) + score
-        chunks[chunk_id] = result.chunk
-
-    # BM25 ranking
-    for rank, result in enumerate(bm25_results, start=1):
-
-        chunk_id = result.chunk.chunk_id
-
-        score = 1 / (k + rank)
-
-        scores[chunk_id] = scores.get(chunk_id, 0) + score
-        chunks[chunk_id] = result.chunk
-
-    # Sort by RRF score
-    ranked_chunks = sorted(
-        scores.items(),
-        key=lambda x: x[1],
-        reverse=True
-    )
-
-    # Return top K
-    results = []
-
-    for chunk_id, score in ranked_chunks[:top_k]:
-
-        results.append(
-            RetrievalResult(
-                chunk=chunks[chunk_id],
-                score=score
-            )
-        )
-
-    return results
+    return [
+        RetrievalResult(chunk=chunks[chunk_id], score=score)
+        for chunk_id, score in ranked[:top_k]
+    ]
 
 
-# ---------- Single entry point ----------
+# ---------- Persistent (in-process) index, built at upload time ----------
 
-def hybrid_retrieve(chunks: list[Chunk], query: str, top_k: int = 3) -> list[RetrievalResult]:
-    vectorstore = chunks_to_vectorstore(chunks)
-    sem_results = semantic_search(vectorstore, query, top_k=top_k)
+class HybridIndex:
+    """FAISS + BM25 index that is updated on upload, not rebuilt on every query."""
 
-    bm25 = BM25Search(chunks)
-    bm25_results = bm25.search(query, top_k=top_k)
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._vectorstore = None
+        self._bm25 = None
+        self.chunks: list[Chunk] = []
 
-    return hybrid_search(sem_results, bm25_results)
+    def __len__(self):
+        return len(self.chunks)
+
+    def add_chunks(self, chunks: list[Chunk]):
+        if not chunks:
+            return
+
+        lc_docs = [chunk_to_lc_doc(c) for c in chunks]
+
+        with self._lock:
+            all_chunks = self.chunks + chunks
+            bm25 = BM25Search(all_chunks)  # cheap: no embeddings involved
+
+            if self._vectorstore is None:
+                self._vectorstore = FAISS.from_documents(lc_docs, get_embeddings())
+            else:
+                self._vectorstore.add_documents(lc_docs)  # embeds only the new chunks
+
+            self.chunks = all_chunks
+            self._bm25 = bm25
+
+    def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[RetrievalResult]:
+        with self._lock:
+            if not self.chunks:
+                return []
+
+            sem_results = semantic_search(self._vectorstore, query, top_k=top_k)
+            bm25_results = self._bm25.search(query, top_k=top_k)
+
+        return hybrid_search(sem_results, bm25_results, top_k=top_k)
