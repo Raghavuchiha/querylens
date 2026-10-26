@@ -1,140 +1,79 @@
-import hashlib
-import json
 import os
-import re
-import shutil
-import threading
-import uuid
-from collections import Counter
-
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from langchain_core.messages import AIMessage, HumanMessage
+import uuid 
+from fastapi import FastAPI, UploadFile, File, Form
 from pydantic import BaseModel
-
-from ingestion import SUPPORTED_EXTENSIONS, get_extension, ingest_multiple_documents
-from query_rewrite import rewrite_query_with_history
+from ingestion import ingest_multiple_documents, Document, Chunk,SUPPORTED_EXTENSIONS,get_extension
 from synthesis import synthesize_answer
 from vectorstore import HybridIndex
+from langchain_core.messages import AIMessage, HumanMessage
+from query_rewrite import rewrite_query_with_history
+from collections import Counter
+
+
 
 app = FastAPI()
+UPLOAD_DIR = "upload_files"
 
-UPLOAD_DIR = "uploaded_files"
-TOP_K = 5
-MAX_HISTORY_MESSAGES = 10  # keep an even number so history starts with a user turn
-
-# In-memory state (lost on restart; fine for a demo, use a DB for production)
 index = HybridIndex()
 all_documents = []
 doc_name_lookup = {}
-seen_hashes = {}  # sha256 of file content -> doc_id (used to skip duplicates)
-chat_histories = {}  # conversation_id -> list of messages
-upload_lock = threading.Lock()
+chat_histories = {} 
 
 
 class QueryRequest(BaseModel):
     query: str
     conversation_id: str = "default"
 
-
-def safe_filename(name: str) -> str:
-    """Strip any directory part and unsafe characters from an uploaded filename."""
-    name = os.path.basename((name or "").replace("\\", "/"))
-    name = re.sub(r"[^A-Za-z0-9._ -]", "_", name).strip(" .")
-    return name
-
-
 @app.post("/upload")
-def upload_documents(
-    files: list[UploadFile] = File(...),
-    doc_type: str = Form("official")
-):
-    saved_files = []  # (path, doc_type)
-    path_info = {}    # path -> (original filename, content hash)
-    batch_hashes = set()
-    skipped = []
-    errors = []
+def upload_documents(files: list[UploadFile] = File(...), doc_type: str = Form("official")):
+    saved_files = []
 
-    with upload_lock:
-        for file in files:
-            filename = safe_filename(file.filename)
+    # 1. Save each file
+    for file in files:
+        if get_extension(file.filename) not in SUPPORTED_EXTENSIONS:
+            continue
+        folder = os.path.join(UPLOAD_DIR, uuid.uuid4().hex)
+        os.makedirs(folder)
+        path = os.path.join(folder, os.path.basename(file.filename))
+        with open(path, "wb") as f:
+            f.write(file.file.read())
+        saved_files.append((path, doc_type))
 
-            if not filename or get_extension(filename) not in SUPPORTED_EXTENSIONS:
-                errors.append(
-                    {"file": file.filename, "error": "Unsupported or invalid file type"}
-                )
-                continue
+    # 2. Ingest (your existing function)
+    documents, chunks, errors = ingest_multiple_documents(saved_files)
 
-            content = file.file.read()
-            content_hash = hashlib.sha256(content).hexdigest()
+    # 3. Add to the search index (your existing method)
+    index.add_chunks(chunks)
 
-            if content_hash in seen_hashes or content_hash in batch_hashes:
-                skipped.append({"file": filename, "reason": "Already uploaded"})
-                continue
+    # 4. Remember the documents
+    all_documents.extend(documents)
+    for doc in documents:
+        doc_name_lookup[doc.doc_id] = doc.name
 
-            # Each upload gets its own folder: no name collisions, no path tricks
-            folder = os.path.join(UPLOAD_DIR, uuid.uuid4().hex)
-            os.makedirs(folder, exist_ok=True)
-            file_path = os.path.join(folder, filename)
+    return {"documents": len(documents), "chunks": len(chunks), "errors": errors}
 
-            with open(file_path, "wb") as f:
-                f.write(content)
 
-            batch_hashes.add(content_hash)
-            saved_files.append((file_path, doc_type))
-            path_info[file_path] = (filename, content_hash)
 
-        documents, chunks, ingest_errors = ingest_multiple_documents(saved_files)
-
-        failed_paths = {path for path, _ in ingest_errors}
-        for path, message in ingest_errors:
-            errors.append({"file": path_info[path][0], "error": message})
-            shutil.rmtree(os.path.dirname(path), ignore_errors=True)  # don't keep unusable files
-
-        index.add_chunks(chunks)
-        all_documents.extend(documents)
-
-        # documents come back in the same order as the files that ingested fine
-        ok_paths = [p for p, _ in saved_files if p not in failed_paths]
-        for path, document in zip(ok_paths, documents):
-            doc_name_lookup[document.doc_id] = document.name
-            seen_hashes[path_info[path][1]] = document.doc_id
-
-    if not documents and (errors or skipped):
-        raise HTTPException(
-            status_code=400,
-            detail={"message": "No documents were added", "errors": errors, "skipped": skipped},
-        )
-
-    return {
-        "message": f"Uploaded {len(documents)} documents",
-        "chunks": len(chunks),
-        "document_ids": [doc.doc_id for doc in documents],
-        "skipped": skipped,
-        "errors": errors,
-    }
-
+class QueryRequest(BaseModel):
+    query: str
+    conversation_id: str = "default"
 
 @app.post("/query")
 def query_documents(request: QueryRequest):
     if len(index) == 0:
-        return {
-            "answer": "No documents have been uploaded yet. Please upload a document first.",
-            "citations": [],
-        }
+        return {"answer": "Please upload a document first.", "citations": []}
 
-    query = request.query
     history = chat_histories.setdefault(request.conversation_id, [])
 
-    try:
-        standalone_query = rewrite_query_with_history(
-            query, history[-MAX_HISTORY_MESSAGES:]
-        )
-        results = index.search(standalone_query, top_k=TOP_K)
-        answer = synthesize_answer(standalone_query, results, doc_name_lookup)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Query failed: {e}")
+    # 1. Turn follow-up into a standalone question
+    query = rewrite_query_with_history(request.query, history[-10:])
 
-    history.append(HumanMessage(content=query))
+    # 2. Search and answer
+    results = index.search(query, top_k=5)
+    answer = synthesize_answer(query, results, doc_name_lookup)
+
+    # 3. Save this turn
+    history.append(HumanMessage(content=request.query))
     history.append(AIMessage(content=answer.text))
 
     return {
@@ -158,6 +97,7 @@ def list_documents():
             for doc in all_documents
         ]
     }
+
 
 
 @app.get("/evaluation/metrics")
