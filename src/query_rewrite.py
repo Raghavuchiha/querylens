@@ -1,8 +1,8 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from llm import get_llm
-#llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash", temperature=0)
+
 llm = get_llm()
+
 
 def rewrite_query_with_history(current_query, chat_history):
     if not chat_history:
@@ -14,17 +14,17 @@ def rewrite_query_with_history(current_query, chat_history):
         HumanMessage(content=f"New question: {current_query}")
     ]
 
-    result = llm.invoke(messages)
+    try:
+        result = llm.invoke(messages)
+        if isinstance(result.content, list):
+            standalone_query = "".join(
+                part if isinstance(part, str) else part.get("text", "")
+                for part in result.content
+            )
+        else:
+            standalone_query = result.content
 
-    # .content can be a plain string OR a list of content parts depending on response type
-    if isinstance(result.content, list):
-        standalone_query = "".join(
-            part if isinstance(part, str) else part.get("text", "")
-            for part in result.content
-        )
-    else:
-        standalone_query = result.content
-
-    standalone_query = standalone_query.strip()
-
-    return standalone_query
+        return standalone_query.strip() or current_query
+    except Exception as e:
+        print("Query rewrite failed:", e)
+        return current_query

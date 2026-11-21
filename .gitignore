@@ -1,13 +1,25 @@
 # Virtual Environment
 lens/
+.venv/
+venv/
 
 # Environment & Secrets
 .env
+.env.*
+!.env.example
 
 # Python compiled files
 __pycache__/
 *.pyc
 *.pyo
+
+# Generated data
+src/upload_files/
+src/index_data.json
+src/index_data.json.tmp
+src/evaluation_results.json
+upload_files/
+index_data.json
 
 # OS
 .DS_Store

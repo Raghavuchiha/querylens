@@ -1,11 +1,22 @@
+fastapi
+uvicorn
+python-multipart
 pydantic
+requests
+streamlit
+langchain
+langchain-core
+langchain-community
+langchain-text-splitters
+langchain-huggingface
+langchain-openai
 sentence-transformers
 faiss-cpu
 rank-bm25
-google-generativeai
 python-dotenv
 pypdf
- langchain 
- langchain-community 
- langchain-text-splitters
- langchain_huggingface
+docx2txt
+# Only needed if you run src/Evaluation.py:
+# ragas
+# datasets
+# pandas

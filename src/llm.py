@@ -4,6 +4,7 @@ from langchain_openai import ChatOpenAI
 
 load_dotenv()
 
+
 def get_llm(temperature=0):
     return ChatOpenAI(
         model="nvidia/nemotron-3.5-super-vl-120b-a12b",
@@ -11,5 +12,7 @@ def get_llm(temperature=0):
         api_key=os.environ["NVIDIA_API_KEY"],
         temperature=temperature,
         max_tokens=2048,
+        timeout=45,
+        max_retries=2,
         extra_body={"chat_template_kwargs": {"enable_thinking": False}},
     )
