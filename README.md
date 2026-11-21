@@ -14,10 +14,10 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-Backend-009688?style=for-the-badge&logo=fastapi&logoColor=white)
-![Streamlit](https://img.shields.io/badge/Streamlit-UI-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
+![React](https://img.shields.io/badge/React-UI-61DAFB?style=for-the-badge&logo=react&logoColor=black)
 ![FAISS](https://img.shields.io/badge/FAISS-Vector_Search-4B8BBE?style=for-the-badge)
 ![BM25](https://img.shields.io/badge/BM25-Keyword_Search-6C63FF?style=for-the-badge)
-![Gemini](https://img.shields.io/badge/Gemini-LLM-4285F4?style=for-the-badge&logo=google&logoColor=white)
+![NVIDIA Nemotron](https://img.shields.io/badge/NVIDIA-Nemotron-76B900?style=for-the-badge&logo=nvidia&logoColor=white)
 
 </p>
 
@@ -47,7 +47,7 @@ You can upload multiple documents such as:
 - 📃 TXT
 - 🗒️ Markdown (`.md`)
 
-QueryLens processes those documents, creates searchable chunks, indexes them using **both semantic and keyword retrieval**, combines the results using **Reciprocal Rank Fusion (RRF)**, and finally asks Gemini to generate a structured answer with citations.
+QueryLens processes those documents, creates searchable chunks, indexes them using **both semantic and keyword retrieval**, combines the results using **Reciprocal Rank Fusion (RRF)**, and finally asks NVIDIA Nemotron to generate a structured answer with citations.
 
 The result is a RAG workflow that is designed to be:
 
@@ -99,7 +99,7 @@ It combines:
                            ↓
                   Top Relevant Chunks
                            ↓
-                    Gemini LLM
+                    NVIDIA Nemotron LLM
                            ↓
                  Structured Answer
                            ↓
@@ -299,7 +299,7 @@ What about 2025?
 
 The second question is ambiguous by itself.
 
-QueryLens keeps conversation history per `conversation_id` and uses Gemini to rewrite the follow-up into a standalone query.
+QueryLens keeps conversation history per `conversation_id` and uses NVIDIA Nemotron to rewrite the follow-up into a standalone query.
 
 Conceptually:
 
@@ -321,7 +321,7 @@ This means retrieval can operate on a clearer query instead of blindly searching
 
 # 🤖 7. Grounded Answer Generation
 
-After retrieval, QueryLens sends only the selected chunks to Gemini.
+After retrieval, QueryLens sends only the selected chunks to NVIDIA Nemotron.
 
 The prompt explicitly instructs the model to:
 
@@ -368,7 +368,7 @@ The final citation flow is:
 ```text
 Retrieved Chunks
       ↓
-Gemini
+NVIDIA Nemotron
       ↓
 LLM citation
       ↓
@@ -387,7 +387,7 @@ Return citation
 
 ```text
 ┌───────────────────────┐
-│       Streamlit       │
+│       React       │
 │       Frontend        │
 └───────────┬───────────┘
             │ HTTP
@@ -429,7 +429,7 @@ Return citation
              │
              ▼
       Query Rewriting
-       + Gemini LLM
+       + NVIDIA Nemotron LLM
              │
              ▼
      Structured LLMAnswer
@@ -462,12 +462,12 @@ assets/querylens-architecture.png
 
 ## Frontend
 
-- **Streamlit**
-- **Requests**
+- **React**
+- **Vite**
 
 ## RAG / LLM
 
-- **Google Gemini**
+- **Google NVIDIA Nemotron**
 - **LangChain Core**
 - **LangChain Google GenAI**
 - **LangChain HuggingFace**
@@ -502,8 +502,7 @@ querylens-main/
 │   ├── api.py
 │   │   └── FastAPI application and API endpoints
 │   │
-│   ├── app.py
-│   │   └── Streamlit chat interface
+│   ├── api.py
 │   │
 │   ├── ingestion.py
 │   │   └── File ingestion + document chunking
@@ -518,7 +517,7 @@ querylens-main/
 │   │   └── Conversational query rewriting
 │   │
 │   ├── synthesis.py
-│   │   └── Gemini answer generation + citation validation
+│   │   └── NVIDIA Nemotron answer generation + citation validation
 │   │
 │   ├── models.py
 │   │   └── Pydantic data models
@@ -575,12 +574,12 @@ pip install -r requirements.txt
 
 ---
 
-## 4. Configure Gemini API key
+## 4. Configure NVIDIA API key
 
 Create a `.env` file:
 
 ```env
-GOOGLE_API_KEY=your_google_gemini_api_key
+NVIDIA_API_KEY=your_nvidia_api_key
 ```
 
 Never commit `.env` to GitHub.
@@ -606,14 +605,15 @@ The API will run at:
 http://127.0.0.1:8000
 ```
 
-### Terminal 2 — Streamlit
+### Terminal 2 — React
 
 ```bash
-cd src
-streamlit run app.py
+cd frontend
+npm install
+npm run dev
 ```
 
-Then open the Streamlit URL shown in your terminal.
+Then open the Vite URL shown in your terminal (usually http://localhost:5173).
 
 ---
 
@@ -764,7 +764,7 @@ GET /evaluation/metrics
 
 # 🧩 Design Decisions
 
-## Why RAG instead of directly asking Gemini?
+## Why RAG instead of directly asking NVIDIA Nemotron?
 
 The required information is often contained inside the user's documents.
 
@@ -879,7 +879,7 @@ The application verifies that an LLM-generated citation refers to a retrieved ch
 
 ### Structured LLM output
 
-Gemini is asked to produce a validated Pydantic structure instead of arbitrary JSON.
+NVIDIA Nemotron is asked to produce a validated Pydantic structure instead of arbitrary JSON.
 
 ---
 
@@ -1012,7 +1012,7 @@ Potential next steps:
 - [ ] User authentication
 - [ ] Per-user document collections
 - [ ] Persistent conversations
-- [ ] Streaming Gemini responses
+- [ ] Streaming NVIDIA Nemotron responses
 - [ ] Document deletion endpoint
 - [ ] Chunk inspection/debug endpoint
 - [ ] Better OCR support for scanned PDFs
@@ -1102,7 +1102,7 @@ Does the document mention the reason?
 ```text
 Retrieved Evidence
         ↓
-      Gemini
+      NVIDIA Nemotron
         ↓
 Structured Answer
         ↓
@@ -1139,11 +1139,11 @@ This is especially useful for a portfolio/GitHub repository because it shows bot
 
 ### One-line version
 
-> **QueryLens is a multi-document RAG assistant that combines FAISS semantic search, BM25 keyword retrieval and Reciprocal Rank Fusion to generate grounded Gemini answers with validated document-level citations.**
+> **QueryLens is a multi-document RAG assistant that combines FAISS semantic search, BM25 keyword retrieval and Reciprocal Rank Fusion to generate grounded NVIDIA Nemotron answers with validated document-level citations.**
 
 ### Short technical version
 
-> Built a FastAPI + Streamlit RAG system supporting PDF, DOCX, TXT and Markdown documents. Implemented page-aware chunking, MiniLM embeddings, FAISS + BM25 hybrid retrieval, RRF ranking, conversational query rewriting, structured Gemini output and citation validation.
+> Built a FastAPI + React RAG system supporting PDF, DOCX, TXT and Markdown documents. Implemented page-aware chunking, MiniLM embeddings, FAISS + BM25 hybrid retrieval, RRF ranking, conversational query rewriting, structured NVIDIA Nemotron output and citation validation.
 
 ### Interview explanation
 
@@ -1164,9 +1164,9 @@ FAISS + BM25 retrieve relevant chunks
         ↓
 RRF combines both rankings
         ↓
-Top chunks are passed to Gemini
+Top chunks are passed to NVIDIA Nemotron
         ↓
-Gemini returns structured answer + chunk IDs
+NVIDIA Nemotron returns structured answer + chunk IDs
         ↓
 QueryLens validates those chunk IDs
         ↓
