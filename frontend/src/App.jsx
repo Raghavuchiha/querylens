@@ -1,24 +1,35 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  ArrowRight, BookOpen, Check, ChevronLeft, ChevronRight, FileText,
+  ArrowRight, BookOpen, ChevronRight, FileText, Trash2,
   LoaderCircle, Menu, MessageCircle, Plus, Send, Sparkles, UploadCloud, X,
 } from 'lucide-react';
-import { listDocuments, queryDocuments, uploadDocuments } from './api';
+import { listDocuments, queryDocuments, uploadDocuments, deleteDocument } from './api';
 
 function createConversation() {
   return { id: crypto.randomUUID(), messages: [] };
+}
+
+function savedConversations() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('querylens_chats'));
+    if (Array.isArray(saved) && saved.length) return saved;
+  } catch (error) {
+    console.warn('Could not load saved conversations:', error);
+  }
+  return [{ id: 'default', messages: [] }];
 }
 
 const formats = ['.pdf', '.txt', '.md', '.docx'];
 const prettyName = (name) => name.length > 34 ? name.slice(0, 31) + '…' : name;
 
 export default function App() {
-  const [conversations, setConversations] = useState(() => [createConversation()]);
+  const [conversations, setConversations] = useState(savedConversations);
   const [activeId, setActiveId] = useState(() => null);
   const [documents, setDocuments] = useState([]);
   const [documentError, setDocumentError] = useState('');
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [uploading, setUploading] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
   const [uploadNotice, setUploadNotice] = useState('');
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
@@ -27,20 +38,40 @@ export default function App() {
   const fileInputRef = useRef(null);
   const bottomRef = useRef(null);
   const busyRef = useRef(false);
+  const currentIdRef = useRef(null);
   const currentId = activeId || conversations[0].id;
   const current = conversations.find((c) => c.id === currentId) || conversations[0];
+  currentIdRef.current = currentId;
 
-  async function refreshDocuments() {
+  useEffect(() => {
     try {
-      const data = await listDocuments();
+      localStorage.setItem('querylens_chats', JSON.stringify(conversations));
+    } catch (error) {
+      console.warn('Could not save conversations:', error);
+    }
+  }, [conversations]);
+
+  async function refreshDocuments(id = currentId) {
+    try {
+      const data = await listDocuments(id);
+      if (currentIdRef.current !== id) return;
       setDocuments(Array.isArray(data?.documents) ? data.documents : []);
       setDocumentError('');
     } catch (error) {
-      setDocumentError('Unable to reach the document service: ' + error.message);
+      if (currentIdRef.current === id) {
+        setDocumentError('Unable to reach the document service: ' + error.message);
+      }
     }
   }
 
-  useEffect(() => { refreshDocuments(); }, []);
+  useEffect(() => {
+    setDocuments([]);
+    setSelectedFiles([]);
+    setUploadNotice('');
+    setDocumentError('');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    refreshDocuments(currentId);
+  }, [currentId]);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [current?.messages.length, asking]);
 
   function newChat() {
@@ -73,22 +104,44 @@ export default function App() {
 
   async function handleUpload() {
     if (!selectedFiles.length || uploading) return;
+    const id = currentId;
+    const files = [...selectedFiles];
     setUploading(true);
     setUploadNotice('');
     try {
-      const result = await uploadDocuments(selectedFiles);
+      const result = await uploadDocuments(files, id);
       const errors = result?.errors || [];
       const success = Number(result?.documents || 0);
       const summary = success + ' document' + (success === 1 ? '' : 's') + ' indexed.';
       const issue = errors.length ? ' ' + errors.length + ' file(s) could not be read.' : '';
-      setUploadNotice(summary + issue);
-      setSelectedFiles([]);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      await refreshDocuments();
+      if (currentIdRef.current === id) {
+        setUploadNotice(summary + issue);
+        setSelectedFiles([]);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+      await refreshDocuments(id);
     } catch (error) {
-      setUploadNotice('Upload failed: ' + error.message);
+      if (currentIdRef.current === id) setUploadNotice('Upload failed: ' + error.message);
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function handleDelete(doc) {
+    if (deletingId || uploading || !window.confirm('Delete "' + doc.name + '" from this conversation?')) return;
+    const id = currentId;
+    setDeletingId(doc.doc_id);
+    setDocumentError('');
+    try {
+      await deleteDocument(doc.doc_id, id);
+      if (currentIdRef.current === id) {
+        setUploadNotice('Deleted ' + doc.name + ' from this knowledge base.');
+        await refreshDocuments(id);
+      }
+    } catch (error) {
+      if (currentIdRef.current === id) setDocumentError('Delete failed: ' + error.message);
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -200,9 +253,9 @@ export default function App() {
                 <button className="upload-action" disabled={uploading} onClick={handleUpload}>{uploading ? <LoaderCircle size={17} className="spin"/> : <UploadCloud size={17}/>} {uploading ? 'INDEXING…' : 'INDEX ' + selectedFiles.length + ' FILE(S)'} <ArrowRight size={17}/></button>
               </div>}
               {uploadNotice && <div role="status" className="notice">{uploadNotice}</div>}
-              <div className="file-list-heading"><span>INDEXED DOCUMENTS</span><button onClick={refreshDocuments} className="refresh-action">REFRESH ↗</button></div>
+              <div className="file-list-heading"><span>INDEXED DOCUMENTS · THIS CHAT</span><button onClick={() => refreshDocuments(currentId)} className="refresh-action">REFRESH ↗</button></div>
               {documentError && <div className="notice error" role="alert">{documentError}</div>}
-              {documents.length ? <div className="indexed-docs">{documents.map((doc) => <div className="indexed-doc" key={doc.doc_id}><div className="doc-icon"><FileText size={18}/></div><div className="doc-details"><strong title={doc.name}>{prettyName(doc.name)}</strong><span>{doc.chunk_count} chunks · {doc.doc_type}</span></div><Check size={17} className="doc-check"/></div>)}</div> : <div className="empty-docs">No indexed documents yet. Start by uploading a file.</div>}
+              {documents.length ? <div className="indexed-docs">{documents.map((doc) => <div className="indexed-doc" key={doc.doc_id}><div className="doc-icon"><FileText size={18}/></div><div className="doc-details"><strong title={doc.name}>{prettyName(doc.name)}</strong><span>{doc.chunk_count} chunks · {doc.doc_type}</span></div><button type="button" className="doc-delete" title={'Delete ' + doc.name} aria-label={'Delete ' + doc.name} disabled={!!deletingId || uploading} onClick={() => handleDelete(doc)}>{deletingId === doc.doc_id ? <LoaderCircle size={17} className="spin"/> : <Trash2 size={17}/>}</button></div>)}</div> : <div className="empty-docs">No indexed documents yet. Start by uploading a file.</div>}
             </section>
 
             <section className="panel chat-panel">

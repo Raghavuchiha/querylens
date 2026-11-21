@@ -31,3 +31,9 @@ When the frontend and API use different hosts, set `VITE_API_URL` to the public 
 ## Scope
 
 No mock document data, fake response streaming, fake authentication, decorative action buttons, or unused routes. The current backend does not provide a document deletion endpoint.
+
+## Separate knowledge bases
+
+Every chat has its own documents. Adding a new conversation creates a new empty knowledge base. Documents are listed and queried using that conversation's ID, and each indexed document has a Delete button that removes it from retrieval. Documents are persisted server-side in `src/index_data.json`, grouped by conversation ID. Conversation IDs and visible messages are saved in browser localStorage; backend follow-up history still resets after a server restart. The initial chat uses the old `default` knowledge base to preserve existing indexed documents.
+
+There is still no authentication: this is intended for personal local use, not a public multi-user deployment. Deleting a document removes its indexed data but does not erase old messages or Git history.

@@ -35,3 +35,13 @@ Saved chat histories are still in memory, while the indexed documents are saved 
 Optional evaluation dependencies: `pip install ragas datasets pandas langchain-google-genai`.
 
 To remove saved indexes during testing, stop the API and delete `src/index_data.json`.
+
+## Per-conversation knowledge bases and document deletion
+
+- Uploads accept `conversation_id` as a form field (defaults to `default` for old clients).
+- `GET /documents?conversation_id=...` shows documents for one conversation.
+- `POST /query` searches only the `conversation_id` provided in its JSON body.
+- `DELETE /documents/{doc_id}?conversation_id=...` deletes an indexed document from that conversation and rebuilds its FAISS/BM25 index from remaining chunks.
+- The saved JSON supports multiple conversation IDs. Old JSON documents are migrated into the `default` knowledge base when loaded.
+- The first browser chat uses `default` to show old documents; new conversations receive new IDs.
+- Conversations are **not access-controlled**. This is single-user local functionality, not secure multi-user separation.

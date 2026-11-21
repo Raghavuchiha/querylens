@@ -10,10 +10,11 @@ async function request(path, options = {}) {
   return payload;
 }
 
-export async function uploadDocuments(files, docType = 'official') {
+export async function uploadDocuments(files, conversationId, docType = 'official') {
   const form = new FormData();
   files.forEach((file) => form.append('files', file));
   form.append('doc_type', docType);
+  form.append('conversation_id', conversationId);
   return request('/upload', { method: 'POST', body: form });
 }
 
@@ -25,6 +26,12 @@ export function queryDocuments(query, conversationId) {
   });
 }
 
-export function listDocuments() {
-  return request('/documents');
+export function listDocuments(conversationId) {
+  return request('/documents?conversation_id=' + encodeURIComponent(conversationId));
+}
+
+export function deleteDocument(docId, conversationId) {
+  return request('/documents/' + encodeURIComponent(docId) + '?conversation_id=' + encodeURIComponent(conversationId), {
+    method: 'DELETE',
+  });
 }

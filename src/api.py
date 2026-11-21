@@ -1,6 +1,7 @@
 import json
 import os
 import uuid
+import threading
 from collections import Counter
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -20,17 +21,29 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "upload_files")
 DATA_FILE = os.path.join(BASE_DIR, "index_data.json")
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB per file
 
-index = HybridIndex()
-all_documents = []
-doc_name_lookup = {}
+# Each conversation has its own documents and search index.
+knowledge_bases = {}
 chat_histories = {}
+data_lock = threading.RLock()
+
+
+def get_knowledge_base(conversation_id):
+    if conversation_id not in knowledge_bases:
+        knowledge_bases[conversation_id] = {
+            "index": HybridIndex(),
+            "documents": [],
+        }
+    return knowledge_bases[conversation_id]
 
 
 def save_index():
-    data = {
-        "documents": [doc.model_dump() for doc in all_documents],
-        "chunks": [chunk.model_dump() for chunk in index.chunks],
-    }
+    data = {"knowledge_bases": {}}
+    for conversation_id, base in knowledge_bases.items():
+        data["knowledge_bases"][conversation_id] = {
+            "documents": [doc.model_dump() for doc in base["documents"]],
+            "chunks": [chunk.model_dump() for chunk in base["index"].chunks],
+        }
+
     temp_file = DATA_FILE + ".tmp"
     with open(temp_file, "w", encoding="utf-8") as f:
         json.dump(data, f)
@@ -40,17 +53,24 @@ def save_index():
 def load_index():
     if not os.path.exists(DATA_FILE):
         return
+
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        documents = [Document(**doc) for doc in data.get("documents", [])]
-        chunks = [Chunk(**chunk) for chunk in data.get("chunks", [])]
-        index.add_chunks(chunks)
-        all_documents.extend(documents)
-        for doc in documents:
-            doc_name_lookup[doc.doc_id] = doc.name
+
+        saved_bases = data.get("knowledge_bases")
+        if saved_bases is None:
+            # Keep documents indexed before conversations had separate bases.
+            saved_bases = {"default": data}
+
+        for conversation_id, saved in saved_bases.items():
+            documents = [Document(**doc) for doc in saved.get("documents", [])]
+            chunks = [Chunk(**chunk) for chunk in saved.get("chunks", [])]
+            base = get_knowledge_base(conversation_id)
+            base["index"].add_chunks(chunks)
+            base["documents"].extend(documents)
     except Exception as e:
-        print("Could not load previous index:", e)
+        print("Could not load previous indexes:", e)
 
 
 load_index()
@@ -62,21 +82,25 @@ class QueryRequest(BaseModel):
 
 
 @app.post("/upload")
-def upload_documents(files: list[UploadFile] = File(...), doc_type: str = Form("official")):
+def upload_documents(
+    files: list[UploadFile] = File(...),
+    doc_type: str = Form("official"),
+    conversation_id: str = Form("default"),
+):
     saved_files = []
     errors = []
 
-    # Save valid files temporarily
     for file in files:
         filename = os.path.basename((file.filename or "").replace("\\", "/"))
         if get_extension(filename) not in SUPPORTED_EXTENSIONS:
             errors.append({"file": filename, "error": "Unsupported file type"})
+            file.file.close()
             continue
 
-        path = os.path.join(UPLOAD_DIR, uuid.uuid4().hex, filename)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        folder = os.path.join(UPLOAD_DIR, uuid.uuid4().hex)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, filename)
         size = 0
-        too_large = False
 
         try:
             with open(path, "wb") as f:
@@ -86,37 +110,39 @@ def upload_documents(files: list[UploadFile] = File(...), doc_type: str = Form("
                         break
                     size += len(part)
                     if size > MAX_FILE_SIZE:
-                        too_large = True
                         break
                     f.write(part)
 
-            if too_large or size == 0:
+            if size == 0 or size > MAX_FILE_SIZE:
                 errors.append({"file": filename, "error": "File is empty or exceeds 10 MB"})
                 os.remove(path)
+                os.rmdir(folder)
             else:
                 saved_files.append((path, doc_type))
         finally:
             file.file.close()
 
-    documents, chunks, ingest_errors = ingest_multiple_documents(saved_files)
+    try:
+        documents, chunks, ingest_errors = ingest_multiple_documents(saved_files)
+    finally:
+        for path, _ in saved_files:
+            if os.path.exists(path):
+                os.remove(path)
+            os.rmdir(os.path.dirname(path))
+
     errors.extend({"file": os.path.basename(path), "error": message} for path, message in ingest_errors)
 
-    # Files are no longer needed after text extraction
-    for path, _ in saved_files:
-        if os.path.exists(path):
-            os.remove(path)
-        os.rmdir(os.path.dirname(path))
-
     if chunks:
-        try:
-            index.add_chunks(chunks)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="Could not index documents: " + str(e))
+        with data_lock:
+            base = get_knowledge_base(conversation_id)
+            try:
+                base["index"].add_chunks(chunks)
+            except Exception as e:
+                print("Indexing failed:", e)
+                raise HTTPException(status_code=500, detail="Could not index the documents.")
 
-        all_documents.extend(documents)
-        for doc in documents:
-            doc_name_lookup[doc.doc_id] = doc.name
-        save_index()
+            base["documents"].extend(documents)
+            save_index()
 
     return {"documents": len(documents), "chunks": len(chunks), "errors": errors}
 
@@ -126,45 +152,71 @@ def query_documents(request: QueryRequest):
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Please enter a question.")
 
-    if len(index) == 0:
-        return {"answer": "Please upload a document first.", "citations": []}
-
-    history = chat_histories.setdefault(request.conversation_id, [])
-    query = rewrite_query_with_history(request.query, history[-10:])
+    with data_lock:
+        base = knowledge_bases.get(request.conversation_id)
+        if not base or len(base["index"]) == 0:
+            return {"answer": "Please upload a document in this conversation first.", "citations": []}
+        index = base["index"]
+        doc_name_lookup = {doc.doc_id: doc.name for doc in base["documents"]}
+        history = chat_histories.get(request.conversation_id, [])[-10:]
 
     try:
+        query = rewrite_query_with_history(request.query, history)
         results = index.search(query, top_k=5)
         answer = synthesize_answer(query, results, doc_name_lookup)
     except Exception as e:
         print("Query failed:", e)
         raise HTTPException(status_code=503, detail="Could not generate an answer. Please try again.")
 
-    history.append(HumanMessage(content=request.query))
-    history.append(AIMessage(content=answer.text))
+    with data_lock:
+        history = chat_histories.setdefault(request.conversation_id, [])
+        history.append(HumanMessage(content=request.query))
+        history.append(AIMessage(content=answer.text))
+        chat_histories[request.conversation_id] = history[-20:]
 
-    # Keep only recent messages in memory
-    chat_histories[request.conversation_id] = history[-20:]
-
-    return {
-        "answer": answer.text,
-        "citations": [c.model_dump() for c in answer.citations],
-    }
+    return {"answer": answer.text, "citations": [c.model_dump() for c in answer.citations]}
 
 
 @app.get("/documents")
-def list_documents():
-    chunk_counts = Counter(c.doc_id for c in index.chunks)
-    return {
-        "documents": [
+def list_documents(conversation_id: str = "default"):
+    with data_lock:
+        base = knowledge_bases.get(conversation_id)
+        if not base:
+            return {"documents": []}
+
+        chunk_counts = Counter(c.doc_id for c in base["index"].chunks)
+        return {"documents": [
             {
                 "doc_id": doc.doc_id,
                 "name": doc.name,
                 "doc_type": doc.doc_type,
                 "chunk_count": chunk_counts.get(doc.doc_id, 0),
             }
-            for doc in all_documents
-        ]
-    }
+            for doc in base["documents"]
+        ]}
+
+
+@app.delete("/documents/{doc_id}")
+def delete_document(doc_id: str, conversation_id: str = "default"):
+    with data_lock:
+        base = knowledge_bases.get(conversation_id)
+        if not base or not any(doc.doc_id == doc_id for doc in base["documents"]):
+            raise HTTPException(status_code=404, detail="Document not found in this conversation.")
+
+        remaining_chunks = [chunk for chunk in base["index"].chunks if chunk.doc_id != doc_id]
+        new_index = HybridIndex()
+        try:
+            new_index.add_chunks(remaining_chunks)
+        except Exception as e:
+            print("Could not rebuild index:", e)
+            raise HTTPException(status_code=500, detail="Could not delete the document.")
+
+        base["index"] = new_index
+        base["documents"] = [doc for doc in base["documents"] if doc.doc_id != doc_id]
+        chat_histories.pop(conversation_id, None)
+        save_index()
+
+    return {"message": "Document deleted."}
 
 
 @app.get("/evaluation/metrics")
