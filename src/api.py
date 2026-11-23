@@ -2,9 +2,11 @@ import json
 import os
 import uuid
 import threading
+import requests
+from dotenv import load_dotenv
 from collections import Counter
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Depends
 from pydantic import BaseModel
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -15,10 +17,11 @@ from query_rewrite import rewrite_query_with_history
 from models import Document, Chunk
 
 
+load_dotenv()
 app = FastAPI()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "upload_files")
-DATA_FILE = os.path.join(BASE_DIR, "index_data.json")
+DATA_FILE = os.path.join(BASE_DIR, "user_index_data.json")
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB per file
 
 # Each conversation has its own documents and search index.
@@ -27,13 +30,14 @@ chat_histories = {}
 data_lock = threading.RLock()
 
 
-def get_knowledge_base(conversation_id):
-    if conversation_id not in knowledge_bases:
-        knowledge_bases[conversation_id] = {
+def get_knowledge_base(user_id, conversation_id):
+    key = user_id + ':' + conversation_id
+    if key not in knowledge_bases:
+        knowledge_bases[key] = {
             "index": HybridIndex(),
             "documents": [],
         }
-    return knowledge_bases[conversation_id]
+    return knowledge_bases[key]
 
 
 def save_index():
@@ -58,15 +62,15 @@ def load_index():
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        saved_bases = data.get("knowledge_bases")
-        if saved_bases is None:
-            # Keep documents indexed before conversations had separate bases.
-            saved_bases = {"default": data}
+        saved_bases = data.get("knowledge_bases", {})
 
-        for conversation_id, saved in saved_bases.items():
+        for key, saved in saved_bases.items():
+            if ':' not in key:
+                continue
+            user_id, conversation_id = key.split(':', 1)
             documents = [Document(**doc) for doc in saved.get("documents", [])]
             chunks = [Chunk(**chunk) for chunk in saved.get("chunks", [])]
-            base = get_knowledge_base(conversation_id)
+            base = get_knowledge_base(user_id, conversation_id)
             base["index"].add_chunks(chunks)
             base["documents"].extend(documents)
     except Exception as e:
@@ -74,6 +78,33 @@ def load_index():
 
 
 load_index()
+
+
+def get_current_user(authorization: str | None = Header(default=None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Please sign in.")
+
+    url = os.getenv("SUPABASE_URL", "").rstrip("/")
+    key = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
+    if not url or not key:
+        raise HTTPException(status_code=503, detail="Supabase authentication is not configured.")
+
+    try:
+        response = requests.get(
+            url + "/auth/v1/user",
+            headers={"apikey": key, "Authorization": authorization},
+            timeout=10,
+        )
+    except requests.RequestException:
+        raise HTTPException(status_code=503, detail="Unable to verify login.")
+
+    if response.status_code != 200:
+        raise HTTPException(status_code=401, detail="Login expired. Please sign in again.")
+
+    user_id = response.json().get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid user session.")
+    return user_id
 
 
 class QueryRequest(BaseModel):
@@ -86,6 +117,7 @@ def upload_documents(
     files: list[UploadFile] = File(...),
     doc_type: str = Form("official"),
     conversation_id: str = Form("default"),
+    user_id: str = Depends(get_current_user),
 ):
     saved_files = []
     errors = []
@@ -148,17 +180,17 @@ def upload_documents(
 
 
 @app.post("/query")
-def query_documents(request: QueryRequest):
+def query_documents(request: QueryRequest, user_id: str = Depends(get_current_user)):
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Please enter a question.")
 
     with data_lock:
-        base = knowledge_bases.get(request.conversation_id)
+        base = knowledge_bases.get(user_id + ":" + request.conversation_id)
         if not base or len(base["index"]) == 0:
             return {"answer": "Please upload a document in this conversation first.", "citations": []}
         index = base["index"]
         doc_name_lookup = {doc.doc_id: doc.name for doc in base["documents"]}
-        history = chat_histories.get(request.conversation_id, [])[-10:]
+        history = chat_histories.get(user_id + ":" + request.conversation_id, [])[-10:]
 
     try:
         query = rewrite_query_with_history(request.query, history)
@@ -169,18 +201,18 @@ def query_documents(request: QueryRequest):
         raise HTTPException(status_code=503, detail="Could not generate an answer. Please try again.")
 
     with data_lock:
-        history = chat_histories.setdefault(request.conversation_id, [])
+        history = chat_histories.setdefault(user_id + ":" + request.conversation_id, [])
         history.append(HumanMessage(content=request.query))
         history.append(AIMessage(content=answer.text))
-        chat_histories[request.conversation_id] = history[-20:]
+        chat_histories[user_id + ":" + request.conversation_id] = history[-20:]
 
     return {"answer": answer.text, "citations": [c.model_dump() for c in answer.citations]}
 
 
 @app.get("/documents")
-def list_documents(conversation_id: str = "default"):
+def list_documents(conversation_id: str = "default", user_id: str = Depends(get_current_user)):
     with data_lock:
-        base = knowledge_bases.get(conversation_id)
+        base = knowledge_bases.get(user_id + ":" + conversation_id)
         if not base:
             return {"documents": []}
 
@@ -197,7 +229,7 @@ def list_documents(conversation_id: str = "default"):
 
 
 @app.delete("/documents/{doc_id}")
-def delete_document(doc_id: str, conversation_id: str = "default"):
+def delete_document(doc_id: str, conversation_id: str = "default", user_id: str = Depends(get_current_user)):
     with data_lock:
         base = knowledge_bases.get(conversation_id)
         if not base or not any(doc.doc_id == doc_id for doc in base["documents"]):
@@ -213,14 +245,14 @@ def delete_document(doc_id: str, conversation_id: str = "default"):
 
         base["index"] = new_index
         base["documents"] = [doc for doc in base["documents"] if doc.doc_id != doc_id]
-        chat_histories.pop(conversation_id, None)
+        chat_histories.pop(user_id + ":" + conversation_id, None)
         save_index()
 
     return {"message": "Document deleted."}
 
 
 @app.get("/evaluation/metrics")
-def get_metrics():
+def get_metrics(user_id: str = Depends(get_current_user)):
     path = os.path.join(BASE_DIR, "evaluation_results.json")
     if not os.path.exists(path):
         return {"message": "No evaluation results found. Run the eval script first."}

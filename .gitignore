@@ -28,3 +28,7 @@ index_data.json
 Raghav_Mandloi_resum*
 sample.txt
 test.py
+
+# Private per-user local index
+src/user_index_data.json
+src/user_index_data.json.tmp

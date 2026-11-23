@@ -37,3 +37,17 @@ No mock document data, fake response streaming, fake authentication, decorative 
 Every chat has its own documents. Adding a new conversation creates a new empty knowledge base. Documents are listed and queried using that conversation's ID, and each indexed document has a Delete button that removes it from retrieval. Documents are persisted server-side in `src/index_data.json`, grouped by conversation ID. Conversation IDs and visible messages are saved in browser localStorage; backend follow-up history still resets after a server restart. The initial chat uses the old `default` knowledge base to preserve existing indexed documents.
 
 There is still no authentication: this is intended for personal local use, not a public multi-user deployment. Deleting a document removes its indexed data but does not erase old messages or Git history.
+
+## Supabase email/password login
+
+Enable Email auth and email confirmations in Supabase → Authentication.
+Set `http://localhost:5173` as the Site URL under URL Configuration.
+
+Copy `frontend/.env.example` to `frontend/.env`, fill in the Supabase project URL and publishable key.
+Copy `src/.env.example` to `src/.env`, fill in the same Supabase URL and publishable key, and keep your existing LLM API key.
+
+Run `npm install` once in `frontend`, then `npm run dev`. Start FastAPI with `cd src && uvicorn api:app --reload`.
+
+FastAPI verifies access tokens with Supabase Auth for each API call and namespaces documents/chats by the authenticated user ID. Old `src/index_data.json` files are not imported because they have no verified ownership. Reupload your documents after login.
+
+**Not production-ready yet:** User data still lives in a local JSON file (`src/user_index_data.json`), not Supabase pgvector. Deploying to an ephemeral host can lose that file. Add durable storage, CORS, and rate limits before a public launch.

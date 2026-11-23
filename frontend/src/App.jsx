@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import Auth from './Auth';
+import { supabase } from './supabase';
 import {
   ArrowRight, BookOpen, ChevronRight, FileText, Trash2,
-  LoaderCircle, Menu, MessageCircle, Plus, Send, Sparkles, UploadCloud, X,
+  LoaderCircle, Menu, MessageCircle, Plus, Send, Sparkles, UploadCloud, X, LogOut,
 } from 'lucide-react';
 import { listDocuments, queryDocuments, uploadDocuments, deleteDocument } from './api';
 
@@ -9,21 +11,21 @@ function createConversation() {
   return { id: crypto.randomUUID(), messages: [] };
 }
 
-function savedConversations() {
+function savedConversations(userId) {
   try {
-    const saved = JSON.parse(localStorage.getItem('querylens_chats'));
+    const saved = JSON.parse(localStorage.getItem('querylens_chats_' + userId));
     if (Array.isArray(saved) && saved.length) return saved;
   } catch (error) {
     console.warn('Could not load saved conversations:', error);
   }
-  return [{ id: 'default', messages: [] }];
+  return [createConversation()];
 }
 
 const formats = ['.pdf', '.txt', '.md', '.docx'];
 const prettyName = (name) => name.length > 34 ? name.slice(0, 31) + '…' : name;
 
-export default function App() {
-  const [conversations, setConversations] = useState(savedConversations);
+function Workspace({ session }) {
+  const [conversations, setConversations] = useState(() => savedConversations(session.user.id));
   const [activeId, setActiveId] = useState(() => null);
   const [documents, setDocuments] = useState([]);
   const [documentError, setDocumentError] = useState('');
@@ -45,7 +47,7 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem('querylens_chats', JSON.stringify(conversations));
+      localStorage.setItem('querylens_chats_' + session.user.id, JSON.stringify(conversations));
     } catch (error) {
       console.warn('Could not save conversations:', error);
     }
@@ -200,6 +202,8 @@ export default function App() {
         </div>
         <div className="sidebar-bottom">
           <div className="sidebar-note"><Sparkles size={18} /><span>Find the signal.<br/>Skip the noise.</span></div>
+          <button className="logout-button" onClick={async () => { const { error } = await supabase.auth.signOut(); if (error) setChatError(error.message); }}><LogOut size={16}/> SIGN OUT</button>
+          <div className="sidebar-user" title={session.user.email}>{session.user.email}</div>
           <div className="sidebar-foot">BUILT FOR CURIOUS MINDS <span>↗</span></div>
         </div>
       </aside>
@@ -288,4 +292,29 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+export default function App() {
+  const [session, setSession] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!supabase) {
+      setLoading(false);
+      return;
+    }
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, next) => {
+      setSession(next);
+      setLoading(false);
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  if (loading) return <div className="auth-page"><div className="auth-card">Opening QueryLens…</div></div>;
+  if (!session) return <Auth/>;
+  return <Workspace key={session.user.id} session={session}/>;
 }

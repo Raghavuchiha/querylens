@@ -45,3 +45,11 @@ To remove saved indexes during testing, stop the API and delete `src/index_data.
 - The saved JSON supports multiple conversation IDs. Old JSON documents are migrated into the `default` knowledge base when loaded.
 - The first browser chat uses `default` to show old documents; new conversations receive new IDs.
 - Conversations are **not access-controlled**. This is single-user local functionality, not secure multi-user separation.
+
+## Supabase authentication
+
+All API endpoints now require a Supabase access token in `Authorization: Bearer <token>`. FastAPI validates it against the Supabase Auth `/auth/v1/user` endpoint and uses the returned user ID when reading and updating knowledge bases.
+
+Configure `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` in `src/.env`. No service-role key is used.
+
+The old shared `index_data.json` is deliberately not loaded; its documents have no trusted owner. The new local file is `user_index_data.json` and indexes are separated by authenticated user and conversation ID. A cloud database and pgvector are **not included** in this authentication-only update.

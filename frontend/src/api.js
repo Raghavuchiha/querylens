@@ -1,7 +1,13 @@
+import { supabase } from './supabase';
+
 const baseUrl = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
 
 async function request(path, options = {}) {
-  const response = await fetch(baseUrl + path, options);
+  const { data, error } = await supabase.auth.getSession();
+  if (error || !data.session) throw new Error('Session expired. Please sign in again.');
+  const headers = new Headers(options.headers || {});
+  headers.set('Authorization', 'Bearer ' + data.session.access_token);
+  const response = await fetch(baseUrl + path, { ...options, headers });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     const detail = payload?.detail;
@@ -12,7 +18,7 @@ async function request(path, options = {}) {
 
 export async function uploadDocuments(files, conversationId, docType = 'official') {
   const form = new FormData();
-  files.forEach((file) => form.append('files', file));
+  files.forEach(file => form.append('files', file));
   form.append('doc_type', docType);
   form.append('conversation_id', conversationId);
   return request('/upload', { method: 'POST', body: form });
