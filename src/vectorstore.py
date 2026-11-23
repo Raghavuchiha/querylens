@@ -4,7 +4,7 @@ from functools import lru_cache
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document as LangchainDocument
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.embeddings.fastembed import FastEmbedEmbeddings
 from rank_bm25 import BM25Okapi
 
 from models import Chunk, RetrievalResult
@@ -16,7 +16,7 @@ RRF_K = 60
 @lru_cache(maxsize=1)
 def get_embeddings():
     # Loaded lazily so importing this module stays fast
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    return FastEmbedEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", threads=1)
 
 
 def tokenize(text: str) -> list[str]:

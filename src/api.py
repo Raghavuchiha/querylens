@@ -21,6 +21,10 @@ from models import Document, Chunk
 load_dotenv()
 app = FastAPI()
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
 # Set CORS_ORIGINS to the deployed Vercel origin (comma-separated for multiple).
 allowed_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()]
 if allowed_origins:
