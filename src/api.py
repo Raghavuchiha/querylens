@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from collections import Counter
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -19,6 +20,17 @@ from models import Document, Chunk
 
 load_dotenv()
 app = FastAPI()
+
+# Set CORS_ORIGINS to the deployed Vercel origin (comma-separated for multiple).
+allowed_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()]
+if allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "upload_files")
 DATA_FILE = os.path.join(BASE_DIR, "user_index_data.json")
