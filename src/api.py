@@ -166,7 +166,7 @@ def upload_documents(
 
     if chunks:
         with data_lock:
-            base = get_knowledge_base(conversation_id)
+            base = get_knowledge_base(user_id, conversation_id)
             try:
                 base["index"].add_chunks(chunks)
             except Exception as e:
@@ -231,7 +231,7 @@ def list_documents(conversation_id: str = "default", user_id: str = Depends(get_
 @app.delete("/documents/{doc_id}")
 def delete_document(doc_id: str, conversation_id: str = "default", user_id: str = Depends(get_current_user)):
     with data_lock:
-        base = knowledge_bases.get(conversation_id)
+        base = knowledge_bases.get(user_id + ':' + conversation_id)
         if not base or not any(doc.doc_id == doc_id for doc in base["documents"]):
             raise HTTPException(status_code=404, detail="Document not found in this conversation.")
 
