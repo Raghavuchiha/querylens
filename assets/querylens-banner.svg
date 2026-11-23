@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="350" viewBox="0 0 1200 350">
+<defs><pattern id="grid" width="26" height="26" patternUnits="userSpaceOnUse"><path d="M26 0H0V26" fill="none" stroke="#4d503c" stroke-width=".6" opacity=".35"/></pattern></defs>
+<rect width="1200" height="350" fill="#22271e"/><rect width="1200" height="350" fill="url(#grid)"/>
+<path d="M0 12H1200 M0 338H1200" stroke="#e5a02b" stroke-width="5"/>
+<rect x="46" y="48" width="64" height="64" fill="#e8a326" stroke="#f1eccd" stroke-width="3"/><text x="63" y="95" font-family="Arial,sans-serif" font-weight="900" font-size="45" fill="#25251a">Q</text>
+<text x="135" y="95" font-family="Arial,sans-serif" font-size="32" font-weight="bold" fill="#f6edd0">QUERY<tspan fill="#f3a334">LENS</tspan></text>
+<text x="51" y="192" font-family="Arial,sans-serif" font-size="64" font-weight="900" letter-spacing="-2" fill="#f7f3e4">YOUR DOCUMENTS.</text>
+<text x="51" y="258" font-family="Arial,sans-serif" font-size="68" font-weight="900" letter-spacing="-2" fill="#ef9e2e">DECODED.</text>
+<text x="54" y="312" font-family="monospace" font-size="17" letter-spacing="2" fill="#b1c9b2">MULTI-DOCUMENT RAG  /  HYBRID SEARCH  /  GROUNDED ANSWERS</text>
+<g transform="translate(904,72) rotate(-8)"><rect x="0" y="0" width="164" height="210" fill="#aec2ab" stroke="#10180e" stroke-width="5"/><text x="15" y="27" font-family="monospace" font-size="13" fill="#1c321e">01 / CONTEXT</text><path d="M18 60H140M18 83H140M18 106H116M18 129H132" stroke="#6b8d6d" stroke-width="8"/></g>
+<g transform="translate(1008,69) rotate(9)"><rect x="0" y="0" width="139" height="198" fill="#e6a053" stroke="#191c16" stroke-width="5"/><text x="11" y="29" font-family="monospace" font-size="12" fill="#1d2118">02 / ANSWERS</text><text x="39" y="131" font-family="Arial,sans-serif" font-size="100" fill="#fff4d5">✳</text><path d="M16 168H120" stroke="#25251a" stroke-width="2"/></g>
+</svg>
