@@ -17,11 +17,13 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-20251D?logo=fastapi)
 ![Supabase Auth](https://img.shields.io/badge/Supabase_Auth-20251D?logo=supabase)
 ![Groq](https://img.shields.io/badge/Groq_LLM-20251D)
-![Hybrid RAG](https://img.shields.io/badge/FAISS_+_BM25_+_RRF-20251D)
+![Hybrid RAG](https://img.shields.io/badge/pgvector_+_BM25_+_RRF-20251D)
 
 </div>
 
 ---
+
+> **Integration status:** This branch implements Supabase pgvector for the web API. Database-level upload, retrieval, isolation and cascade deletion tests passed. Full authenticated application and restart tests are pending; the live deployment may still run the legacy FAISS backend. See [PGVECTOR_INTEGRATION.md](PGVECTOR_INTEGRATION.md).
 
 ## ✳️ The workspace, in action
 
@@ -39,12 +41,12 @@
 | | Capability | What it does |
 |:--:|---|---|
 | 📂 | **Multi-document upload** | Index PDF, DOCX, TXT and MD files in the same conversation. |
-| 🧠 | **Hybrid retrieval** | Combine semantic FAISS search with BM25 keyword matching. |
+| 🧠 | **Hybrid retrieval** | Combine persistent pgvector semantic search with BM25 keyword matching. |
 | 🧮 | **Reciprocal Rank Fusion** | Merge both ranked retrieval lists instead of comparing incompatible raw scores. |
 | 💬 | **Follow-up questions** | Rewrite conversational follow-ups into standalone search queries. |
 | 🔖 | **Validated citations** | Match model-produced chunk IDs against actual retrieved chunks, with document/page snippets. |
 | 🔐 | **Supabase login** | Email/password authentication with session management. |
-| 🗂️ | **Conversation knowledge bases** | Scope each index to a verified user and a conversation ID; list and remove indexed files. |
+| 🗂️ | **Conversation knowledge bases** | Persist documents and embeddings per verified user and conversation; enforce ownership with PostgreSQL row-level security. |
 | 🪶 | **CPU-friendly embeddings** | Run MiniLM through ONNX-based FastEmbed instead of loading the full PyTorch stack. |
 
 ---
@@ -61,28 +63,31 @@ flowchart TB
     KBS --> UP["Document ingestion<br/>PDF · DOCX · TXT · MD"]
     UP --> CHUNK["Page-aware chunks<br/>512 characters / 128 overlap"]
     CHUNK --> EMB["MiniLM embeddings<br/>FastEmbed · ONNX"]
-    EMB --> FAISS["FAISS<br/>semantic index"]
-    CHUNK --> BM25["BM25<br/>keyword index"]
-    FAISS --> RRF["Reciprocal Rank Fusion<br/>k = 60"]
+    EMB --> DB["Supabase PostgreSQL<br/>pgvector 384D + RLS"]
+    CHUNK --> DB
+    DB --> VECTOR["pgvector exact L2 search"]
+    DB --> BM25["BM25 over stored chunk text"]
+    VECTOR --> RRF["Reciprocal Rank Fusion<br/>k = 60"]
     BM25 --> RRF
     UI --> Q["Question"]
     Q --> REWRITE["Follow-up query rewrite"]
-    REWRITE --> RRF
+    REWRITE --> QE["Query embedding"]
+    QE --> VECTOR
+    REWRITE --> BM25
     RRF --> TOP["Top 5 source chunks"]
     TOP --> LLM["Groq LLM<br/>structured answer"]
     LLM --> VERIFY["Citation validation<br/>chunk ID · source · page"]
     VERIFY --> UI
-    KBS -.-> LOCAL["Local JSON cache<br/>temporary on Render"]
 ```
 
 <details>
 <summary><b>How hybrid retrieval actually works</b></summary>
 
-### Semantic search → FAISS
-Document chunks are embedded with `sentence-transformers/all-MiniLM-L6-v2` (384-dimensional vectors) using FastEmbed, then searched using FAISS. This helps match questions even when the wording differs.
+### Semantic search → pgvector
+Document chunks are embedded with `sentence-transformers/all-MiniLM-L6-v2` (384-dimensional vectors) using FastEmbed and stored with their metadata in Supabase PostgreSQL. The API calls `ql_match_chunks` for exact, conversation-scoped L2 retrieval and converts squared distance to `1 / (1 + distance)`. This score is not a probability or cosine similarity. The standalone legacy retrieval pipeline still supports FAISS.
 
 ### Keyword search → BM25
-BM25 searches the same chunks using token overlap, helping with exact terms such as `JWT`, `OAuth2`, product names, and identifiers.
+BM25 is rebuilt from persisted text in the selected conversation for each query and searches using token overlap, helping with exact terms such as `JWT`, `OAuth2`, product names, and identifiers.
 
 ### Fusion → RRF
 QueryLens combines the ranked results:
@@ -111,7 +116,7 @@ The system prompt requests an answer from the retrieved text only. The model ret
       ↓
 03  UPLOAD        PDFs / DOCX / TXT / Markdown
       ↓
-04  INDEX         MiniLM embeddings → FAISS + BM25
+04  INDEX         MiniLM embeddings → Supabase pgvector
       ↓
 05  ASK           Query rewrite → Hybrid search → RRF
       ↓
@@ -123,17 +128,17 @@ The system prompt requests an answer from the retrieved text only. The model ret
 | Layer | Tools |
 |---|---|
 | Frontend | React 18, Vite, Lucide icons, CSS |
-| Authentication | Supabase Auth |
+| Authentication | Supabase Auth + PostgreSQL RLS |
 | API | Python, FastAPI, Pydantic, Uvicorn |
 | Parsing | PyPDF, docx2txt, LangChain document loaders |
 | Chunking | RecursiveCharacterTextSplitter |
 | Embeddings | FastEmbed / ONNX · all-MiniLM-L6-v2 |
-| Semantic retrieval | FAISS |
+| Semantic retrieval | Supabase pgvector (exact L2); FAISS for standalone legacy retrieval |
 | Lexical retrieval | BM25Okapi |
 | Ranking | Reciprocal Rank Fusion |
 | Generation | Groq API through LangChain ChatOpenAI |
 | Deployment | Vercel frontend · Render backend |
-| Current index persistence | Local JSON on backend (temporary on free hosting) |
+| Persistent storage | Supabase PostgreSQL · documents, document_chunks, conversations |
 
 ---
 
@@ -154,7 +159,8 @@ querylens/
 │   ├── api.py               # protected FastAPI endpoints
 │   ├── ingestion.py         # file loading & chunking
 │   ├── loaders.py           # supported file loaders
-│   ├── vectorstore.py       # MiniLM + FAISS + BM25 + RRF
+│   ├── vectorstore.py       # MiniLM + legacy FAISS + BM25 + RRF
+│   ├── pgvector_store.py    # authenticated persistent retrieval adapter
 │   ├── query_rewrite.py     # conversational search query
 │   ├── synthesis.py         # Groq answers + citation checks
 │   ├── llm.py               # Groq model configuration
@@ -164,6 +170,7 @@ querylens/
 │   └── querylens-workspace.jpg
 ├── requirements.txt
 ├── render.yaml
+├── PGVECTOR_INTEGRATION.md
 └── DEPLOYMENT.md
 ```
 
@@ -176,6 +183,7 @@ querylens/
 ```bash
 git clone https://github.com/Raghavuchiha/querylens.git
 cd querylens
+git switch pgvector-integration
 python -m venv .venv
 ```
 
@@ -218,6 +226,8 @@ VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_your_key
 VITE_API_URL=/api
 ```
 
+The database must have the existing `conversations`, `documents` and `document_chunks` tables, `vector(384)`, ownership policies and the `ql_save_upload` and `ql_match_chunks` RPCs. See [PGVECTOR_INTEGRATION.md](PGVECTOR_INTEGRATION.md). The API forwards the user's bearer token with the publishable key; no service-role key is required.
+
 In the Supabase dashboard, enable **Authentication → Email**, and configure the local redirect URL under **Authentication → URL Configuration**.
 
 Launch the backend:
@@ -251,7 +261,7 @@ All document/query routes require a valid **Supabase access token** as `Authoriz
 | `POST` | `/upload` | Upload and index documents for a conversation |
 | `POST` | `/query` | Ask a question and receive an answer with citations |
 | `GET` | `/documents?conversation_id=...` | List documents in a conversation |
-| `DELETE` | `/documents/{doc_id}?conversation_id=...` | Delete a document and rebuild its conversation index |
+| `DELETE` | `/documents/{doc_id}?conversation_id=...` | Delete a document and cascade-delete associated chunks |
 | `GET` | `/evaluation/metrics` | Read a local evaluation results file, if present |
 
 **Query example**
@@ -288,7 +298,7 @@ All document/query routes require a valid **Supabase access token** as `Authoriz
 |---|---|---|
 | **Vercel** | React frontend | [Open QueryLens](https://querylens-mu.vercel.app) |
 | **Render** | FastAPI backend | [API docs](https://querylens-api-sczu.onrender.com/docs) |
-| **Supabase** | Email/password auth | [Supabase](https://supabase.com) |
+| **Supabase** | Email/password auth and persistent pgvector (integration branch) | [Supabase](https://supabase.com) |
 | **Groq** | Language model inference | [Groq Cloud](https://console.groq.com) |
 
 The frontend's deployed `VITE_API_URL` must be the **full Render URL**. Render's `CORS_ORIGINS` must exactly match the Vercel origin, without a trailing slash. Read [DEPLOYMENT.md](DEPLOYMENT.md) for deployment instructions.
@@ -297,15 +307,18 @@ The frontend's deployed `VITE_API_URL` must be the **full Render URL**. Render's
 
 This is a **portfolio/demo implementation**, not a fully production-hardened document service.
 
-- **Temporary storage:** FAISS-related chunk data is saved to a local JSON file. Render's free filesystem does not guarantee data across restarts/deploys. Durable Supabase pgvector storage is planned, not implemented.
+- **Migration and rollout:** pgvector persistence is implemented on this branch and database-level tests passed. Legacy local JSON documents are not migrated automatically; back them up and re-upload or migrate before switching the live backend.
+- **Retrieval scaling:** Exact vector search and per-query BM25 reconstruction are intended for modest conversation sizes; approximate indexing and keyword caching remain future improvements.
+- **Backend chat memory:** Follow-up history is process-local and resets on backend restart.
 - **Browser-local chats:** The React conversation history lives in localStorage, scoped by user ID on the same browser, not synchronized across devices.
 - **Server-side Groq key:** The backend currently uses an environment API key. Per-user BYOK support is planned, not implemented.
 - **Limits:** Public multi-user rate limiting and upload quotas beyond the per-file size cap need further work.
-- **Testing:** Initial deployment and backend startup are verified; successful upload behavior must still be tested end to end with the deployed embedding model.
+- **Testing:** Database-level vector insertion, retrieval, cross-user isolation and deletion passed. Authenticated end-to-end upload, citations, deletion and restart testing remain pending.
 
 ### Next steps
 
-- [ ] Move vectors and metadata to **Supabase pgvector**
+- [x] Implement persistent **Supabase pgvector** storage on the integration branch
+- [ ] Verify authenticated end-to-end behavior and restart persistence, then deploy
 - [ ] Add **per-user Groq API key (BYOK)** configuration
 - [ ] Add persistent conversation history
 - [ ] Improve upload telemetry, error messages and request limits
