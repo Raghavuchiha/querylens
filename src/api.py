@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from ingestion import ingest_multiple_documents, SUPPORTED_EXTENSIONS, get_extension
 from synthesis import synthesize_answer
-from vectorstore import HybridIndex
+from pgvector_store import PgVectorStore
 from query_rewrite import rewrite_query_with_history
 from models import Document, Chunk
 
@@ -37,63 +37,11 @@ if allowed_origins:
     )
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "upload_files")
-DATA_FILE = os.path.join(BASE_DIR, "user_index_data.json")
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB per file
 
-# Each conversation has its own documents and search index.
-knowledge_bases = {}
+# Chat history remains process-local; documents and vectors are durable.
 chat_histories = {}
 data_lock = threading.RLock()
-
-
-def get_knowledge_base(user_id, conversation_id):
-    key = user_id + ':' + conversation_id
-    if key not in knowledge_bases:
-        knowledge_bases[key] = {
-            "index": HybridIndex(),
-            "documents": [],
-        }
-    return knowledge_bases[key]
-
-
-def save_index():
-    data = {"knowledge_bases": {}}
-    for conversation_id, base in knowledge_bases.items():
-        data["knowledge_bases"][conversation_id] = {
-            "documents": [doc.model_dump() for doc in base["documents"]],
-            "chunks": [chunk.model_dump() for chunk in base["index"].chunks],
-        }
-
-    temp_file = DATA_FILE + ".tmp"
-    with open(temp_file, "w", encoding="utf-8") as f:
-        json.dump(data, f)
-    os.replace(temp_file, DATA_FILE)
-
-
-def load_index():
-    if not os.path.exists(DATA_FILE):
-        return
-
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        saved_bases = data.get("knowledge_bases", {})
-
-        for key, saved in saved_bases.items():
-            if ':' not in key:
-                continue
-            user_id, conversation_id = key.split(':', 1)
-            documents = [Document(**doc) for doc in saved.get("documents", [])]
-            chunks = [Chunk(**chunk) for chunk in saved.get("chunks", [])]
-            base = get_knowledge_base(user_id, conversation_id)
-            base["index"].add_chunks(chunks)
-            base["documents"].extend(documents)
-    except Exception as e:
-        print("Could not load previous indexes:", e)
-
-
-load_index()
 
 
 def get_current_user(authorization: str | None = Header(default=None)):
@@ -134,6 +82,7 @@ def upload_documents(
     doc_type: str = Form("official"),
     conversation_id: str = Form("default"),
     user_id: str = Depends(get_current_user),
+    authorization: str = Header(...),
 ):
     saved_files = []
     errors = []
@@ -181,36 +130,30 @@ def upload_documents(
     errors.extend({"file": os.path.basename(path), "error": message} for path, message in ingest_errors)
 
     if chunks:
-        with data_lock:
-            base = get_knowledge_base(user_id, conversation_id)
-            try:
-                base["index"].add_chunks(chunks)
-            except Exception as e:
-                print("Indexing failed:", e)
-                raise HTTPException(status_code=500, detail="Could not index the documents.")
-
-            base["documents"].extend(documents)
-            save_index()
+        store = PgVectorStore(user_id, conversation_id, authorization)
+        store.save(documents, chunks)
 
     return {"documents": len(documents), "chunks": len(chunks), "errors": errors}
 
 
 @app.post("/query")
-def query_documents(request: QueryRequest, user_id: str = Depends(get_current_user)):
+def query_documents(request: QueryRequest, user_id: str = Depends(get_current_user), authorization: str = Header(...)):
     if not request.query.strip():
         raise HTTPException(status_code=400, detail="Please enter a question.")
 
+    store = PgVectorStore(user_id, request.conversation_id, authorization)
+    documents = store.documents()
+    if not documents:
+        return {"answer": "Please upload a document in this conversation first.", "citations": []}
+    doc_name_lookup = {doc["id"]: doc["name"] for doc in documents}
     with data_lock:
-        base = knowledge_bases.get(user_id + ":" + request.conversation_id)
-        if not base or len(base["index"]) == 0:
-            return {"answer": "Please upload a document in this conversation first.", "citations": []}
-        index = base["index"]
-        doc_name_lookup = {doc.doc_id: doc.name for doc in base["documents"]}
         history = chat_histories.get(user_id + ":" + request.conversation_id, [])[-10:]
 
     try:
         query = rewrite_query_with_history(request.query, history)
-        results = index.search(query, top_k=5)
+        results = store.search(query, top_k=5)
+        if not results:
+            return {"answer": "Please upload a document in this conversation first.", "citations": []}
         answer = synthesize_answer(query, results, doc_name_lookup)
     except Exception as e:
         print("Query failed:", e)
@@ -226,44 +169,23 @@ def query_documents(request: QueryRequest, user_id: str = Depends(get_current_us
 
 
 @app.get("/documents")
-def list_documents(conversation_id: str = "default", user_id: str = Depends(get_current_user)):
-    with data_lock:
-        base = knowledge_bases.get(user_id + ":" + conversation_id)
-        if not base:
-            return {"documents": []}
-
-        chunk_counts = Counter(c.doc_id for c in base["index"].chunks)
-        return {"documents": [
-            {
-                "doc_id": doc.doc_id,
-                "name": doc.name,
-                "doc_type": doc.doc_type,
-                "chunk_count": chunk_counts.get(doc.doc_id, 0),
-            }
-            for doc in base["documents"]
-        ]}
+def list_documents(conversation_id: str = "default", user_id: str = Depends(get_current_user), authorization: str = Header(...)):
+    store = PgVectorStore(user_id, conversation_id, authorization)
+    counts = Counter(r["document_id"] for r in store.rows("document_chunks", "document_id,id"))
+    return {"documents": [
+        {"doc_id": d["id"], "name": d["name"], "doc_type": d["doc_type"],
+         "chunk_count": counts.get(d["id"], 0)}
+        for d in store.documents()
+    ]}
 
 
 @app.delete("/documents/{doc_id}")
-def delete_document(doc_id: str, conversation_id: str = "default", user_id: str = Depends(get_current_user)):
+def delete_document(doc_id: str, conversation_id: str = "default", user_id: str = Depends(get_current_user), authorization: str = Header(...)):
+    store = PgVectorStore(user_id, conversation_id, authorization)
+    if not store.delete(doc_id):
+        raise HTTPException(404, "Document not found in this conversation.")
     with data_lock:
-        base = knowledge_bases.get(user_id + ':' + conversation_id)
-        if not base or not any(doc.doc_id == doc_id for doc in base["documents"]):
-            raise HTTPException(status_code=404, detail="Document not found in this conversation.")
-
-        remaining_chunks = [chunk for chunk in base["index"].chunks if chunk.doc_id != doc_id]
-        new_index = HybridIndex()
-        try:
-            new_index.add_chunks(remaining_chunks)
-        except Exception as e:
-            print("Could not rebuild index:", e)
-            raise HTTPException(status_code=500, detail="Could not delete the document.")
-
-        base["index"] = new_index
-        base["documents"] = [doc for doc in base["documents"] if doc.doc_id != doc_id]
         chat_histories.pop(user_id + ":" + conversation_id, None)
-        save_index()
-
     return {"message": "Document deleted."}
 
 
